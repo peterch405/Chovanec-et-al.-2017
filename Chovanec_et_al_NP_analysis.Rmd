@@ -987,8 +987,8 @@ hist_data.fillna(0).to_csv('/media/chovanec/My_Passport/protocol_paper/sonicatio
 
 ```{r}
 
-sonication_hist <- read_delim("/media/chovanec/My_Passport/protocol_paper/sonication_hist.tab", 
-                              "\t", escape_double = FALSE, trim_ws = TRUE)
+sonication_hist <- suppressWarnings(suppressMessages(read_delim("/media/chovanec/My_Passport/protocol_paper/sonication_hist.tab", 
+                              "\t", escape_double = FALSE, trim_ws = TRUE)))
 
 
 
@@ -1001,5 +1001,254 @@ ggplot(data = sonication_hist, aes(x = X1, y = mean)) +
   theme_gdocs() + 
   scale_y_continuous(expand = c(0, 0), limits = c(0,750)) +
   scale_x_continuous(expand = c(0, 0), limits = c(0,315))
+
+```
+
+#### UMI bias
+
+Setup R so matplotlib can be shown
+```{r setup}
+
+library(knitr)
+library(reticulate)
+
+knitr::knit_engines$set(python = reticulate::eng_python)
+
+```
+
+
+```{python, engine.path="/home/chovanec/anaconda3/bin/python"}
+
+from babrahamlinkon import general
+from collections import Counter, OrderedDict, defaultdict
+
+
+def umi_counts(fq, umi_len, q_score):
+    anchor_1='GACTCGT'
+    anchor_2='CTGCTCCT'
+    #split by anchor so see if they have different bias
+    umis_an1 = []
+    umis_an2 = []
+    with general.file_open(fq) as jvr:
+        for item in general.fastq_parse(jvr):
+            title = item[0]
+            seq = item[1]
+            thrd = item[2]
+            qual = item[3]
+
+            #perfect match wanted just so indels don't mess up UMI
+            if seq[umi_len:umi_len+len(anchor_1)] == anchor_1:
+                if general.check_qual(qual[:umi_len], q_score): #check quality
+                    continue
+                else:
+                    umis_an1.append(seq[:umi_len])
+            elif seq[umi_len:umi_len+len(anchor_2)] == anchor_2:
+                if general.check_qual(qual[:umi_len], q_score):
+                    continue
+                else:
+                    umis_an2.append(seq[:umi_len])
+
+    umi_counts_an1 = Counter(umis_an1)
+    umi_counts_an2 = Counter(umis_an2)
+    return (umi_counts_an1, umi_counts_an2)
+
+
+
+umi_5_an1, umi_5_an2 = umi_counts('/media/chovanec/My_Passport/protocol_paper/lane5460_GCCAAT_5ug_L001_R1_val_1.fq.gz', 12, 30)
+umi_5 = umi_5_an1 + umi_5_an2
+
+from itertools import product
+import numpy as np
+import matplotlib.pyplot as plt
+from numpy import random
+import scipy.stats
+
+
+poss_umis = [''.join(i) for i in product(['A','C','T','G'], repeat = 12)]
+
+def plot_distances_bin(possible_umis, umi_cnts):
+
+    umis_counter = Counter(possible_umis)
+
+    bins = np.linspace(0,len(umis_counter),167, dtype=int)
+    umis_all = umis_counter + umi_cnts
+    threshold = len(umis_all)/len(umi_cnts)
+
+    umis_all = sorted(umis_all.items(), key=lambda i: i[0])
+
+    intervals = []
+    bin_count = defaultdict(list)
+    for i in bins:
+        bin_count[i]
+    count = 0
+    fill_bin = 1
+    position = 0
+    for i in umis_all:
+        umi, c = i
+        if c == 1: #count the empty space between UMI's
+            count += 1
+        else:
+            intervals.append(count)
+            if position < bins[fill_bin]:
+                bin_count[bins[fill_bin]].append(count)
+            else:
+                fill_bin += 1
+                if position < bins[fill_bin]:
+                    bin_count[bins[fill_bin]].append(count)
+            count = 0
+        position += 1
+
+    #remove first bin (as its just 0), not sure why I'm creating 167 and then removing one :\
+    del bin_count[0]
+    #mean each key
+    bin_count_mean = {k:np.mean(v) for k,v in bin_count.items()}
+    bin_count_mean = {k:v/threshold for k,v in bin_count_mean.items()}
+
+    cv_sample = scipy.stats.variation(list(bin_count_mean.values()))
+    sample_mean = np.mean(list(bin_count_mean.values()))
+    #what should the distribution look like if the UMI's were truly random?
+  
+    random.seed(1234) #make reproducibe
+
+
+    random_umis = random.choice(possible_umis, len(umi_cnts), replace=False)
+    # random_umis = random.choice(possible_umis, len(umi_cnts), replace=True)
+
+    umis_counter_rn = Counter(possible_umis)
+    umis_all_rn = umis_counter_rn + Counter(random_umis)
+
+    umis_all_rn = sorted(umis_all_rn.items(), key=lambda i: i[0])
+
+
+    intervals_rn = []
+    bin_count_rn = defaultdict(list)
+    for i in bins:
+        bin_count_rn[i]
+    count = 0
+    fill_bin = 1
+    position = 0
+    for i in umis_all_rn:
+        umi, c = i
+        if c == 1:
+            count += 1
+        else:
+            intervals_rn.append(count)
+            if position < bins[fill_bin]:
+                bin_count_rn[bins[fill_bin]].append(count)
+            else:
+                fill_bin += 1
+                if position < bins[fill_bin]:
+                    bin_count_rn[bins[fill_bin]].append(count)
+            count = 0
+        position += 1
+
+    #remove first bin (as its just 0)
+    del bin_count_rn[0]
+
+    bin_count_rn_mean = {k:np.mean(v) for k,v in bin_count_rn.items()}
+    #threshold scaling factor
+    bin_count_rn_mean = {k:v/threshold for k,v in bin_count_rn_mean.items()}
+
+    cv_rn = scipy.stats.variation(list(bin_count_rn_mean.values()))
+    rn_mean = np.mean(list(bin_count_rn_mean.values()))
+   
+
+
+    dims = (15, 5)
+    fig, (ax1, ax2) = plt.subplots(1, 2, sharey=True, figsize=dims)
+
+    ax1.plot([0., len(bins)], [sample_mean, sample_mean], "k--", alpha = 0.5)
+    ax1.plot(range(len(bin_count_mean)), list(bin_count_mean.values()), color="blue")
+    plt.xticks(range(len(bin_count_mean)), bin_count_mean.keys())
+    ax1.text(2, 0, cv_sample, fontsize=10)
+    ax1.set_ylim(0,4.5)
+    ax1.xaxis.set_ticks([])
+
+    #straight line
+    ax2.plot([0., len(bins)], [rn_mean, rn_mean], "k--", alpha = 0.5)
+    ax2.plot(range(len(bin_count_rn_mean)), list(bin_count_rn_mean.values()), color="green")
+    plt.xticks(range(len(bin_count_rn_mean)), bin_count_rn_mean.keys())
+    ax2.text(2, 0, cv_rn, fontsize=10)
+    ax2.set_ylim(0,4.5)
+    ax2.xaxis.set_ticks([])
+    
+    plt.show()
+
+
+
+plot_distances_bin(poss_umis, umi_5_an1)
+plot_distances_bin(poss_umis, umi_5_an2)
+#joint
+plot_distances_bin(poss_umis, umi_5)
+
+
+```
+
+Output image:
+![output](/media/chovanec/My_Passport/protocol_paper/5ug_bin_umi_diversity_an1_dsn.svg)
+Output image:
+![output](/media/chovanec/My_Passport/protocol_paper/5ug_bin_umi_diversity_an2_dsn.svg)
+
+Output image:
+![output](/media/chovanec/My_Passport/protocol_paper/5ug_bin_umi_diversity_dsn.svg)
+
+
+#### Species accumulation curves
+
+```{r}
+
+# require(devtools)
+# install_version("preseqR", version = "1.2.1", repos = "http://cran.us.r-project.org")
+
+library(preseqR)
+set.seed(123456)
+library(ggthemes)
+
+
+filenames_tsv <- list.files("/media/chovanec/My_Passport/protocol_paper/", 
+                            pattern="*per_umi_per_position.tsv", full.names=TRUE)
+
+for(f in seq_along(filenames_tsv)){
+  assign(paste(strsplit(basename(filenames_tsv[f]), "_L00")[[1]][1], "_counts", sep = ""), 
+         suppressWarnings(suppressMessages(read_delim(filenames_tsv[f], "\t", escape_double = FALSE, trim_ws = TRUE))))
+}
+
+all_dfs_c <- paste(sapply(strsplit(basename(filenames_tsv), "_L00"), "[[", 1), "_counts", sep="")
+
+
+hist_5ug <- data.frame(count=lane5460_GCCAAT_5ug_counts$counts, num=lane5460_GCCAAT_5ug_counts$instances_post)
+hist_1ug <- data.frame(count=lane5460_TGACCA_1ug_counts$counts, num=lane5460_TGACCA_1ug_counts$instances_post)
+hist_2.5ug <- data.frame(count=lane5460_ACAGTG_2_5ug_counts$counts, num=lane5460_ACAGTG_2_5ug_counts$instances_post)
+hist_500ng <- data.frame(count=lane5460_CGATGT_500ng_counts$counts, num=lane5460_CGATGT_500ng_counts$instances_post)
+
+true_curve_5ug <- suppressWarnings(suppressMessages(preseqR.interpolate.distinct(hist_5ug, ss=10000)))
+true_curve_1ug <- suppressWarnings(suppressMessages(preseqR.interpolate.distinct(hist_1ug, ss=10000)))
+true_curve_500ng <- suppressWarnings(suppressMessages(preseqR.interpolate.distinct(hist_500ng, ss=10000)))
+true_curve_2.5ug <- suppressWarnings(suppressMessages(preseqR.interpolate.distinct(hist_2.5ug, ss=10000)))
+
+## predicting the accumulation curve using 1% random sample
+
+hist_1ug.preseqR <- suppressWarnings(suppressMessages(preseqR.rfa.species.accum.curve(hist_1ug,ss=10000, max.extrapolation=4000000)))
+hist_5ug.preseqR <- suppressWarnings(suppressMessages(preseqR.rfa.species.accum.curve(hist_5ug,ss=10000, max.extrapolation=4000000)))
+hist_2.5ug.preseqR <- suppressWarnings(suppressMessages(preseqR.rfa.species.accum.curve(hist_2.5ug,ss=10000, max.extrapolation=4000000)))
+hist_500ng.preseqR <- suppressWarnings(suppressMessages(preseqR.rfa.species.accum.curve(hist_500ng,ss=10000, max.extrapolation=4000000)))
+
+ggplot()+
+  geom_line(data=as.data.frame(true_curve_5ug), aes(x=sample.size/1000, y=interpolation)) +
+  geom_line(data=as.data.frame(true_curve_1ug), aes(x=sample.size/1000, y=interpolation)) +
+  geom_line(data=as.data.frame(true_curve_2.5ug), aes(x=sample.size/1000, y=interpolation)) +
+  geom_line(data=as.data.frame(true_curve_500ng), aes(x=sample.size/1000, y=interpolation)) +
+  geom_line(data=as.data.frame(hist_5ug.preseqR), aes(x=sample.size/1000, y=yield.estimate), linetype = 2) +
+  geom_line(data=as.data.frame(hist_1ug.preseqR), aes(x=sample.size/1000, y=yield.estimate), linetype = 2) +
+  geom_line(data=as.data.frame(hist_2.5ug.preseqR), aes(x=sample.size/1000, y=yield.estimate), linetype = 2) +
+  geom_line(data=as.data.frame(hist_500ng.preseqR), aes(x=sample.size/1000, y=yield.estimate), linetype = 2) +
+  geom_ribbon(data=as.data.frame(hist_5ug.preseqR), aes(x=sample.size/1000, ymin=lower.0.95CI, ymax=uppper.0.95CI), alpha=0.2) +
+  geom_ribbon(data=as.data.frame(hist_1ug.preseqR), aes(x=sample.size/1000, ymin=lower.0.95CI, ymax=uppper.0.95CI), alpha=0.2) +
+  geom_ribbon(data=as.data.frame(hist_2.5ug.preseqR), aes(x=sample.size/1000, ymin=lower.0.95CI, ymax=uppper.0.95CI), alpha=0.2) +
+  geom_ribbon(data=as.data.frame(hist_500ng.preseqR), aes(x=sample.size/1000, ymin=lower.0.95CI, ymax=uppper.0.95CI), alpha=0.2) + 
+  theme_gdocs() +
+  scale_y_continuous(expand = c(0, 0), breaks = pretty(seq(0,300000), 6), labels = scales::comma) + 
+  scale_x_continuous(expand = c(0, 0), breaks = pretty(seq(0,4000), 8), labels = scales::comma) +
+  theme(axis.text.x=element_text(angle=90,hjust=1,vjust=0.5))
 
 ```
